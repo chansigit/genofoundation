@@ -1,1 +1,1 @@
-# VAE tests package
+# VAE trainer tests package
