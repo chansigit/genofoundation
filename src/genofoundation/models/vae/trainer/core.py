@@ -565,7 +565,7 @@ class VAETrainer:
 
             # Early stopping (only check on main process, then broadcast)
             if self.early_stopping and val_metrics:
-                should_stop = self.early_stopping(val_metrics['recon_loss'])
+                should_stop = self.early_stopping(val_metrics['loss'])
                 # Broadcast early stopping decision to all processes
                 should_stop = self.accelerator.gather(
                     torch.tensor([should_stop], device=self.device)
