@@ -49,3 +49,10 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "*" = ["*.yaml", "*.yml", "*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # Ignore scheduler.step() warning in tests - we test schedulers in isolation without optimizer
+    "ignore:Detected call of `lr_scheduler.step\\(\\)` before `optimizer.step\\(\\)`:UserWarning",
+]

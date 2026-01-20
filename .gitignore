@@ -99,3 +99,5 @@ data/*
 # Notebooks folder: keep folder but ignore all contents
 notebooks/*
 !notebooks/.gitkeep
+
+outputs/*
