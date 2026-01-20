@@ -88,8 +88,8 @@ class VAEEncoder(BaseEncoder):
         
         # Get distribution parameters
         mu = self.fc_mu(h)
-        logvar = torch.clamp(self.fc_logvar(h), max=10)  # Clamp for stability
-        
+        logvar = torch.clamp(self.fc_logvar(h), min=-10, max=10)  # Clamp both sides for stability
+
         return {
             'mu': mu,
             'log_var': logvar
@@ -330,61 +330,38 @@ class VAE(BaseEmbeddingModel):
         self,
         x: torch.Tensor,
         outputs: Dict[str, torch.Tensor],
-        reduction: str = "mean",
         beta: float = 1.0,
-        logvar_clamp: tuple = (-20.0, 2.0),
     ) -> Dict[str, torch.Tensor]:
         """
-        Compute VAE loss = Reconstruction (per-sample sum) + beta * KL (per-sample sum).
-        Then aggregate across the batch according to `reduction`.
-    
+        Compute VAE loss = Reconstruction + beta * KL.
+        Both terms are normalized by feature dimension and averaged over batch.
+
         Args:
             x: ground-truth input, shape [B, ...]
             outputs: dict with keys {'reconstruction', 'mu', 'log_var'}
-            reduction: 'mean' | 'sum' | 'none'
-                - 'mean': average over batch
-                - 'sum': sum over batch
-                - 'none': return per-sample losses (shape [B])
             beta: weight on KL term
-            logvar_clamp: (min, max) clamp range for numerical stability
-    
+
         Returns:
-            Dict with keys:
-                'total', 'reconstruction', 'kl'
-                Each is a scalar for 'mean'/'sum', or a [B] tensor for 'none'.
+            Dict with keys: 'total', 'reconstruction', 'kl'
         """
         recon = outputs["reconstruction"]
         mu = outputs["mu"]
         log_var = outputs["log_var"]
-    
-        # ---- Reconstruction term (per-sample sum) ----
-        # Use elementwise MSE, then sum over all non-batch dims to get per-sample losses.
-        recon_elwise = F.mse_loss(recon, x, reduction="none")           # [B, ...]
-        recon_per = recon_elwise.view(recon_elwise.size(0), -1).sum(1)  # [B]
-    
-        # ---- KL term (per-sample sum) ----
-        # KL(N(mu, sigma^2) || N(0, I)) = -0.5 * sum(1 + log_var - mu^2 - exp(log_var))
-        log_var = torch.clamp(log_var, min=logvar_clamp[0], max=logvar_clamp[1])
-        var = torch.exp(log_var)
-        kl_elwise = -0.5 * (1.0 + log_var - mu.pow(2) - var)            # [B, latent_dims...]
-        kl_per = kl_elwise.view(kl_elwise.size(0), -1).sum(1)           # [B]
-    
-        # ---- Aggregate across batch ----
-        if reduction == "mean":
-            recon_loss = recon_per.mean()
-            kl_loss = kl_per.mean()
-            total = recon_loss + beta * kl_loss
-        elif reduction == "sum":
-            recon_loss = recon_per.sum()
-            kl_loss = kl_per.sum()
-            total = recon_loss + beta * kl_loss
-        elif reduction == "none":
-            recon_loss = recon_per
-            kl_loss = kl_per
-            total = recon_loss + beta * kl_loss
-        else:
-            raise ValueError(f"Unknown reduction: {reduction}")
-    
+
+        # Number of features for normalization
+        Nf = recon[0].numel()
+
+        # Reconstruction loss: sum over features, mean over batch, normalize by Nf
+        recon_loss = F.mse_loss(recon, x, reduction="none")
+        recon_loss = recon_loss.view(recon_loss.size(0), -1).sum(1).mean() / Nf
+
+        # KL divergence: sum over latent dims, mean over batch, normalize by Nf
+        # Note: log_var is already clamped in encoder
+        kl_loss = -0.5 * (1.0 + log_var - mu.pow(2) - log_var.exp())
+        kl_loss = kl_loss.sum(1).mean() / Nf
+
+        total = recon_loss + beta * kl_loss
+
         return {"total": total, "reconstruction": recon_loss, "kl": kl_loss} 
     
     
