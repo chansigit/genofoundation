@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 
 # Simple VAE model for testing
@@ -12,14 +13,15 @@ class SimpleVAE(nn.Module):
         
         self.decoder = nn.Sequential(
             nn.Linear(latent_dim, 256),
-            nn.ReLU(), 
+            nn.ReLU(),
             nn.Linear(256, input_dim),
-            nn.Sigmoid()
+            nn.Softplus()
         )
         
     def encode(self, x):
         h = self.encoder(x)
         mean, logvar = h.chunk(2, dim=-1)
+        logvar = torch.clamp(logvar, min=-10, max=10)
         return mean, logvar
         
     def decode(self, z):
@@ -45,15 +47,15 @@ class SimpleVAE(nn.Module):
         recon = outputs['reconstruction']
         mean = outputs['mean']
         logvar = outputs['logvar']
-        
-        # Reconstruction loss
-        recon_loss = nn.functional.mse_loss(recon, x, reduction='mean')
-        
-        # KL divergence
+
+        # Reconstruction loss: sum over features, mean over batch
+        recon_loss = nn.functional.mse_loss(recon, x, reduction='none').sum(dim=1).mean()
+
+        # KL divergence: sum over latent, mean over batch
         kl_loss = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1).mean()
-        
+
         total_loss = recon_loss + beta * kl_loss
-        
+
         return {
             'total': total_loss,
             'reconstruction': recon_loss,
