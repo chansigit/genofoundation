@@ -45,14 +45,28 @@ class SimpleVAE(nn.Module):
         
     def loss(self, x, outputs, beta=1.0):
         recon = outputs['reconstruction']
-        mean = outputs['mean']
+        mean  = outputs['mean']
         logvar = outputs['logvar']
 
+        # Number of features/pixels
+        Nf  = recon[0].numel()
+
+        # Reconstruction loss
+        res = nn.functional.mse_loss(recon, x, reduction='none') # find the residuals
+        recon_loss = res.reshape(res.shape[0], -1).sum(dim=1).mean() # flatten, sum by features, mean by samples
+        recon_loss = recon_loss / Nf
+        
+        # KL divergence
+        perdim_kl = -0.5 *( 1 + logvar - mean.pow(2) - logvar.exp() )
+        kl_loss = perdim_kl.sum(dim=1).mean() # sum by latent features, mean by samples
+        kl_loss = kl_loss / Nf
+        
+        
         # Reconstruction loss: sum over features, mean over batch
-        recon_loss = nn.functional.mse_loss(recon, x, reduction='none').sum(dim=1).mean()
+        #recon_loss = nn.functional.mse_loss(recon, x, reduction='none').sum(dim=1).mean()
 
         # KL divergence: sum over latent, mean over batch
-        kl_loss = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1).mean()
+        #kl_loss = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1).mean()
 
         total_loss = recon_loss + beta * kl_loss
 
