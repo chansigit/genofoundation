@@ -155,6 +155,13 @@ class VAETrainer:
         # Set up callbacks
         self.callbacks = CallbackList(callbacks)
 
+        # Warn if early stopping is enabled but no validation loader
+        if self.early_stopping and self.val_loader is None:
+            logger.warning(
+                "Early stopping is enabled but no validation loader provided. "
+                "Early stopping will be ineffective."
+            )
+
     @property
     def device(self) -> torch.device:
         """Get the current device from Accelerator."""
@@ -173,7 +180,7 @@ class VAETrainer:
             dataset,
             batch_size=self.config.batch_size,
             shuffle=shuffle,
-            num_workers=4,
+            num_workers=self.config.num_workers,
             pin_memory=True,
             drop_last=shuffle,
         )
@@ -241,9 +248,11 @@ class VAETrainer:
         """
         self.model.train()
 
-        total_loss = 0.0
-        total_recon_loss = 0.0
-        total_kl_loss = 0.0
+        # Use tensors for accumulation to reduce GPU-CPU sync overhead.
+        # Only sync once at epoch end instead of every batch.
+        total_loss = torch.tensor(0.0, device=self.device)
+        total_recon_loss = torch.tensor(0.0, device=self.device)
+        total_kl_loss = torch.tensor(0.0, device=self.device)
         total_grad_norm = 0.0
         num_batches = 0
         num_grad_steps = 0
@@ -280,10 +289,10 @@ class VAETrainer:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-            # Accumulate metrics (gather across processes)
-            total_loss += self.accelerator.gather(loss).mean().item()
-            total_recon_loss += self.accelerator.gather(losses['reconstruction']).mean().item()
-            total_kl_loss += self.accelerator.gather(losses['kl']).mean().item()
+            # Accumulate metrics on GPU (no sync per batch)
+            total_loss = total_loss + loss.detach()
+            total_recon_loss = total_recon_loss + losses['reconstruction'].detach()
+            total_kl_loss = total_kl_loss + losses['kl'].detach()
             num_batches += 1
 
             # Update global step when gradients are synced
@@ -294,7 +303,7 @@ class VAETrainer:
                 if self.config.scheduler == "onecycle" and self.scheduler is not None:
                     self.scheduler.step()
 
-            # Batch metrics for callback
+            # Batch metrics for callback (sync here for callback compatibility)
             batch_metrics = {
                 'loss': loss.item(),
                 'recon_loss': losses['reconstruction'].item(),
@@ -307,22 +316,30 @@ class VAETrainer:
             # Callback: batch end
             self.callbacks.on_batch_end(self, batch_idx, batch_metrics)
 
-            # Logging (only on main process)
+            # Logging (only on main process, reuse batch_metrics to avoid extra sync)
             if batch_idx % self.config.log_every == 0:
                 self.log_info(
                     f"Epoch [{self.current_epoch + 1}/{self.config.epochs}] "
                     f"Step [{batch_idx}/{len(self.train_loader)}] "
-                    f"Loss: {loss.item():.4f} "
-                    f"Recon: {losses['reconstruction'].item():.4f} "
-                    f"KL: {losses['kl'].item():.4f} "
+                    f"Loss: {batch_metrics['loss']:.4f} "
+                    f"Recon: {batch_metrics['recon_loss']:.4f} "
+                    f"KL: {batch_metrics['kl_loss']:.4f} "
                     f"Beta: {current_beta:.4f}"
                 )
 
-        # Compute average metrics
+        # Reduce across all processes (single sync point for epoch metrics)
+        total_loss = self.accelerator.reduce(total_loss, reduction="sum")
+        total_recon_loss = self.accelerator.reduce(total_recon_loss, reduction="sum")
+        total_kl_loss = self.accelerator.reduce(total_kl_loss, reduction="sum")
+
+        # Global batch count = local batches * number of processes
+        global_num_batches = num_batches * self.accelerator.num_processes
+
+        # Compute average metrics (single .item() calls at epoch end)
         avg_metrics = {
-            'loss': total_loss / num_batches,
-            'recon_loss': total_recon_loss / num_batches,
-            'kl_loss': total_kl_loss / num_batches,
+            'loss': (total_loss / global_num_batches).item(),
+            'recon_loss': (total_recon_loss / global_num_batches).item(),
+            'kl_loss': (total_kl_loss / global_num_batches).item(),
             'beta': current_beta,
             'lr': self.optimizer.param_groups[0]['lr'],
         }
@@ -352,7 +369,7 @@ class VAETrainer:
         for batch in self.val_loader:
             x, condition = self._unpack_batch(batch)
 
-            outputs = self.model(x, condition)
+            outputs = self.model(x, condition=condition)
             losses = self.model.loss(x, outputs, beta=self.config.beta)
 
             # Gather across processes
@@ -399,7 +416,7 @@ class VAETrainer:
             filename=filename,
             model=unwrapped_model,
             optimizer=self.optimizer,
-            epoch=self.current_epoch,
+            epoch=self.current_epoch + 1,  # Save next epoch to resume from
             global_step=self.global_step,
             config=self.config,
             best_val_loss=self.best_val_loss,

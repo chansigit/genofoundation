@@ -71,6 +71,9 @@ class TrainerConfig:
     # Accelerate settings
     mixed_precision: str = "no"
 
+    # DataLoader settings
+    num_workers: int = 4
+
     def __post_init__(self):
         """Validate configuration after initialization."""
         # Convert OmegaConf ListConfig to regular list if needed
@@ -140,6 +143,7 @@ class TrainerConfig:
             'wandb_notes': self.wandb_notes,
             'wandb_dir': self.wandb_dir,
             'mixed_precision': self.mixed_precision,
+            'num_workers': self.num_workers,
         }
 
 

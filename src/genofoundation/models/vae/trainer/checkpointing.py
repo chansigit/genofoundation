@@ -148,7 +148,9 @@ class CheckpointManager:
             Dictionary containing all checkpoint data
         """
         map_location = device if device else 'cpu'
-        checkpoint = torch.load(path, map_location=map_location)
+        # weights_only=False is required because checkpoint contains non-tensor data
+        # (config dict, loss lists, etc.). Only load checkpoints from trusted sources.
+        checkpoint = torch.load(path, map_location=map_location, weights_only=False)
 
         # Load model state
         model.load_state_dict(checkpoint['model_state_dict'])
