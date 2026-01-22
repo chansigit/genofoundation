@@ -59,6 +59,9 @@ class ResBlockUp(nn.Module):
         if up_mode == 'pixelshuffle':
             self.conv1 = nn.Conv2d(in_channels, out_channels * 4, kernel_size=3, padding=1, bias=False)
             self.up = nn.PixelShuffle(2)
+        elif up_mode == 'none':
+            self.up = nn.Identity()
+            self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
         else:
             self.up = nn.Upsample(scale_factor=2, mode='nearest')
             self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
@@ -68,11 +71,20 @@ class ResBlockUp(nn.Module):
         self.norm2 = nn.GroupNorm(groups, out_channels)
 
         # --- Shortcut Path ---
-        self.shortcut = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='nearest'),
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
-            nn.GroupNorm(groups, out_channels)
-        )
+        if up_mode == 'none':
+            if in_channels != out_channels:
+                self.shortcut = nn.Sequential(
+                    nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
+                    nn.GroupNorm(groups, out_channels)
+                )
+            else:
+                self.shortcut = nn.Identity()
+        else:
+            self.shortcut = nn.Sequential(
+                nn.Upsample(scale_factor=2, mode='nearest'),
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
+                nn.GroupNorm(groups, out_channels)
+            )
 
     def forward(self, x):
         identity = self.shortcut(x)
