@@ -38,6 +38,7 @@ class WandbLogger:
         config,
         output_dir: Optional[str] = None,
         resume_run_id: Optional[str] = None,
+        external_run: Optional[Any] = None,
     ):
         """Initialize the wandb logger.
 
@@ -45,6 +46,7 @@ class WandbLogger:
             config: Training configuration containing wandb settings
             output_dir: Output directory for offline logs
             resume_run_id: Optional wandb run ID to resume (from checkpoint)
+            external_run: Optional pre-initialized wandb run to use instead of creating new
 
         Raises:
             RuntimeError: If online mode and authentication fails
@@ -56,12 +58,21 @@ class WandbLogger:
         self.wandb_run = None
         self._enabled = config.wandb_mode != "disabled"
         self._resume_run_id = resume_run_id
+        self._external_run = external_run
 
         if self._enabled:
             self._setup()
 
     def _setup(self) -> None:
         """Set up wandb based on mode."""
+        # If external run is provided, use it directly (skip setup)
+        if self._external_run is not None:
+            self.wandb_run = self._external_run
+            logger.info(
+                f"Using external wandb run: {self.wandb_run.name} (id: {self.wandb_run.id})"
+            )
+            return
+
         try:
             import wandb
         except ImportError:

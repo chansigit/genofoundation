@@ -64,8 +64,9 @@ trainer:
   save_every: 10
   save_best: true
   max_checkpoints: 3
+  save_after_epoch: 20  # Skip saving during warmup
   # Logging
-  log_every: 50
+  log_every: 100
   wandb_mode: "disabled"
   wandb_project: "vae_tms"
   # Mixed precision

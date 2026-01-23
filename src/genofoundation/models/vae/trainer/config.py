@@ -57,6 +57,7 @@ class TrainerConfig:
     save_every: int = 10
     save_best: bool = True
     max_checkpoints: Optional[int] = 5
+    save_after_epoch: int = 20  # Skip saving checkpoints during warmup
 
     # Logging (Weights & Biases)
     log_every: int = 100
@@ -134,6 +135,7 @@ class TrainerConfig:
             'save_every': self.save_every,
             'save_best': self.save_best,
             'max_checkpoints': self.max_checkpoints,
+            'save_after_epoch': self.save_after_epoch,
             'log_every': self.log_every,
             'wandb_mode': self.wandb_mode,
             'wandb_project': self.wandb_project,

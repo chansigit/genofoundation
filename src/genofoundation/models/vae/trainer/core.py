@@ -57,6 +57,7 @@ class VAETrainer:
         callbacks: Optional[List[Callback]] = None,
         output_dir: str = "./outputs",
         seed: Optional[int] = None,
+        wandb_run: Optional[Any] = None,
     ):
         """Initialize the trainer.
 
@@ -72,6 +73,7 @@ class VAETrainer:
             callbacks: List of training callbacks
             output_dir: Output directory for checkpoints and logs
             seed: Random seed for reproducibility
+            wandb_run: Optional pre-initialized wandb run to use for logging
         """
         # Parse config
         if isinstance(config, dict):
@@ -145,6 +147,11 @@ class VAETrainer:
         # Logging is initialized lazily in train() to support resume
         self.metrics_logger = None
         self._wandb_run_id = None  # Will be set when wandb is initialized or loaded from checkpoint
+        self._external_wandb_run = wandb_run  # External wandb run passed from caller
+
+        # FLOPs tracking
+        self.flops_per_sample: Optional[int] = None
+        self.cumulative_flops: int = 0
 
         # Set up checkpointing
         self.checkpoint_manager = CheckpointManager(
@@ -490,6 +497,7 @@ class VAETrainer:
             self.config,
             output_dir=self.output_dir,
             resume_run_id=self._wandb_run_id,
+            external_run=self._external_wandb_run,  # Use external run if provided
         )
 
         # Store the run ID for future checkpoints
@@ -523,6 +531,43 @@ class VAETrainer:
 
         self.callbacks.on_train_start(self)
 
+        # Calculate FLOPs and log model info to wandb summary
+        if self.accelerator.is_main_process and self.flops_per_sample is None:
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            num_params = sum(p.numel() for p in unwrapped_model.parameters())
+            num_trainable_params = sum(p.numel() for p in unwrapped_model.parameters() if p.requires_grad)
+
+            # Log model params to wandb summary
+            if self.metrics_logger and self.metrics_logger.wandb_run:
+                import wandb
+                wandb.summary['model/num_parameters'] = num_params
+                wandb.summary['model/num_trainable_parameters'] = num_trainable_params
+
+            # Calculate FLOPs using thop
+            try:
+                from thop import profile as thop_profile
+
+                first_batch = next(iter(self.train_loader))
+                x_sample, _ = self._unpack_batch(first_batch)
+                x_single = x_sample[:1].to(self.device)
+
+                # Use thop to count FLOPs (returns MACs, multiply by 2 for FLOPs)
+                macs, _ = thop_profile(unwrapped_model, inputs=(x_single,), verbose=False)
+                self.flops_per_sample = int(macs * 2)  # MACs to FLOPs
+
+                if self.flops_per_sample > 0:
+                    self.log_info(f"FLOPs per sample: {self.flops_per_sample:.2e} ({macs:.2e} MACs)")
+                    # Log as summary (constant value, not time series)
+                    if self.metrics_logger and self.metrics_logger.wandb_run:
+                        wandb.summary['model/flops_per_sample'] = self.flops_per_sample
+                        wandb.summary['model/macs_per_sample'] = int(macs)
+                else:
+                    self.log_info("FLOPs calculation returned 0")
+                    self.flops_per_sample = None
+            except Exception as e:
+                self.log_info(f"FLOPs calculation skipped: {e}")
+                self.flops_per_sample = None
+
         # Training loop
         for epoch in range(self.current_epoch, self.config.epochs):
             self.current_epoch = epoch
@@ -554,6 +599,25 @@ class VAETrainer:
                 if self.config.scheduler == "plateau" and self.scheduler:
                     self.scheduler.step(val_loss)
 
+                # Log val/train loss ratio
+                if self.metrics_logger and train_metrics['loss'] > 0:
+                    val_train_ratio = val_loss / train_metrics['loss']
+                    self.metrics_logger.log_metrics({
+                        'val_train_loss_ratio': val_train_ratio,
+                    }, step=epoch, prefix='metrics')
+
+            # Update cumulative FLOPs after each epoch (log even if 0)
+            if self.accelerator.is_main_process:
+                if self.flops_per_sample:
+                    samples_this_epoch = len(self.train_loader.dataset)
+                    self.cumulative_flops += self.flops_per_sample * samples_this_epoch
+                if self.metrics_logger:
+                    import math
+                    flops_metrics = {'cumulative_flops': self.cumulative_flops}
+                    if self.cumulative_flops > 0:
+                        flops_metrics['log10_cumulative_flops'] = math.log10(self.cumulative_flops)
+                    self.metrics_logger.log_metrics(flops_metrics, step=epoch, prefix='compute')
+
             # Other schedulers step per epoch
             if self.scheduler and self.config.scheduler not in ["plateau", "onecycle"]:
                 self.scheduler.step()
@@ -573,12 +637,13 @@ class VAETrainer:
                 )
             self.log_info(log_msg)
 
-            # Save checkpoints
-            if self.config.save_best and is_best:
-                self.save_checkpoint("best_model.pt", is_best=True)
+            # Save checkpoints (skip during warmup period)
+            if epoch >= self.config.save_after_epoch:
+                if self.config.save_best and is_best:
+                    self.save_checkpoint("best_model.pt", is_best=True)
 
-            if (epoch + 1) % self.config.save_every == 0:
-                self.save_checkpoint(f"checkpoint_epoch_{epoch + 1}.pt")
+                if (epoch + 1) % self.config.save_every == 0:
+                    self.save_checkpoint(f"checkpoint_epoch_{epoch + 1}.pt")
 
             # Early stopping (only check on main process, then broadcast)
             if self.early_stopping and val_metrics:
